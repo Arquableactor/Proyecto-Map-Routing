@@ -25,6 +25,7 @@ import folium
 import streamlit as st
 from streamlit_folium import st_folium
 
+from src.engine.directions import generate_route_instructions
 from src.graph_builder import build_graph
 from src.ui.route_service import (
     AVAILABLE_ALGORITHMS,
@@ -32,6 +33,12 @@ from src.ui.route_service import (
     find_route,
     route_endpoints,
     route_polyline,
+)
+from src.ui.ui_helpers import (
+    format_count,
+    format_distance,
+    format_duration,
+    format_point,
 )
 
 OSM_PATH = Path("data/santo_domingo.osm")
@@ -216,12 +223,30 @@ def handle_click(map_state):
     st.rerun()
 
 
-def format_point(point):
-    """Formatea un par de coordenadas para mostrarlo en pantalla."""
-    if point is None:
-        return "sin elegir"
+def render_instructions(network):
+    """Muestra las indicaciones paso a paso debajo del mapa.
 
-    return f"{point[0]:.5f}, {point[1]:.5f}"
+    Es un requisito explicito del enunciado: no basta con dibujar la linea, hay
+    que decir que hacer en cada cruce.
+    """
+    route = st.session_state.route
+
+    if route is None or not route["success"]:
+        return
+
+    steps = generate_route_instructions(route, network.graph, network.coordinates)
+
+    if not steps:
+        return
+
+    st.subheader("Pasos a seguir")
+
+    # Una ruta larga puede pasar de veinte indicaciones; se dejan dentro de un
+    # contenedor con desplazamiento para no empujar el mapa fuera de la vista.
+    with st.container(height=260):
+        st.markdown(
+            "\n".join(f"{number}. {step}" for number, step in enumerate(steps, start=1))
+        )
 
 
 def render_selection():
@@ -290,12 +315,12 @@ def render_result():
         st.warning(route["message"])
         return
 
-    st.metric("Distancia", f"{route['distance_m']:,.0f} m")
-    st.metric("Tiempo estimado", f"{route['estimated_time_s']:,.0f} s")
+    st.metric("Distancia", format_distance(route["distance_m"]))
+    st.metric("Tiempo estimado", format_duration(route["estimated_time_s"]))
 
     st.caption(
-        f"{len(route['path']):,} nodos en la ruta · "
-        f"{route['visited_nodes']:,} nodos explorados · "
+        f"{format_count(len(route['path']))} nodos en la ruta · "
+        f"{format_count(route['visited_nodes'])} nodos explorados · "
         f"{route['runtime_ms']:,.1f} ms · "
         f"{route['algorithm']} ({route['heuristic']})"
     )
@@ -375,8 +400,11 @@ def main():
             key="mapa",
         )
 
-    # Se procesa antes de dibujar el panel para que no muestre datos viejos.
+    # Se procesa antes de dibujar el resto para que no muestre datos viejos.
     handle_click(map_state)
+
+    with map_column:
+        render_instructions(network)
 
     with panel_column:
         render_selection()

@@ -1,7 +1,7 @@
 """Contrato de salida del agente de busqueda y validaciones comunes.
 
 Todo algoritmo de este paquete (UCS, A*) devuelve exactamente el mismo
-diccionario. Ese formato esta acordado con el Integrante 3, que dibuja la ruta
+diccionario. Ese formato esta acordado con Gabriel, que dibuja la ruta
 en el mapa: cambiar una clave rompe la integracion, asi que no se toca sin
 avisar al equipo.
 
@@ -142,7 +142,7 @@ def build_failure_result(
 ):
     """Arma el resultado de una busqueda sin ruta o con datos invalidos.
 
-    Mantiene todas las claves del contrato: el Integrante 3 siempre recibe la
+    Mantiene todas las claves del contrato: Gabriel siempre recibe la
     misma estructura y solo tiene que mirar "success".
     """
     return {

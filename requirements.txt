@@ -1,0 +1,14 @@
+# Dependencias de la interfaz web unicamente.
+#
+# El procesamiento del mapa y los algoritmos de busqueda usan solo la
+# biblioteca estandar de Python: aqui no hay ninguna libreria que calcule
+# rutas ni que construya grafos. Folium y Streamlit dibujan, no razonan.
+#
+# Instalacion:
+#     python3 -m venv .venv
+#     source .venv/bin/activate
+#     pip install -r requirements.txt
+
+streamlit==1.61.1
+folium==0.20.0
+streamlit-folium==0.27.4

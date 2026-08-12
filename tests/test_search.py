@@ -27,6 +27,12 @@ Tres detalles estan puestos a proposito:
 
 import unittest
 
+from src.search.astar import astar
+from src.search.heuristics import (
+    distance_heuristic,
+    graph_max_speed_mps,
+    time_heuristic,
+)
 from src.search.route_result import (
     COST_KEYS,
     NO_ROUTE_MESSAGE,
@@ -34,7 +40,7 @@ from src.search.route_result import (
 )
 from src.search.ucs import ucs
 
-# Claves exactas que el Integrante 3 espera recibir.
+# Claves exactas que Gabriel espera recibir.
 RESULT_KEYS = {
     "success",
     "path",
@@ -49,7 +55,7 @@ RESULT_KEYS = {
 
 
 def make_edge(distance_m, time_s, street, highway, way_id):
-    """Crea una arista con el mismo formato que entrega el Integrante 1."""
+    """Crea una arista con el mismo formato que entrega Deivy."""
     return {
         "distance_m": distance_m,
         "time_s": time_s,
@@ -237,6 +243,233 @@ class UcsTests(unittest.TestCase):
         self.assertFalse(empty["success"])
         self.assertFalse(bad_mode["success"])
         self.assertIn("dinero", bad_mode["message"])
+
+
+class HeuristicTests(unittest.TestCase):
+    """Propiedades matematicas de las que depende que A* sea optimo.
+
+    Estas pruebas no comprueban "que el codigo corra": comprueban las dos
+    condiciones que hacen valida la implementacion con closed_set.
+    """
+
+    def test_velocidad_maxima_del_grafo(self):
+        """La via mas rapida del grafo de juguete es la Avenida Norte."""
+        # 500 m en 25 s = 20 m/s = 72 km/h.
+        self.assertAlmostEqual(graph_max_speed_mps(TOY_GRAPH), 20.0)
+
+    def test_la_heuristica_nunca_sobreestima(self):
+        """Admisibilidad: h(n) <= costo optimo real de n hasta el destino.
+
+        El costo optimo real se obtiene con UCS, que no usa heuristica. Se
+        comprueba desde todos los nodos que tienen ruta hasta el destino.
+        """
+        goal = 3
+        toy_max_speed = graph_max_speed_mps(TOY_GRAPH)
+
+        for node in TOY_GRAPH:
+            if node == goal:
+                continue
+
+            with self.subTest(node=node):
+                real_distance = ucs(TOY_GRAPH, node, goal, mode="distance")
+                real_time = ucs(TOY_GRAPH, node, goal, mode="time")
+
+                if not real_distance["success"]:
+                    continue
+
+                self.assertLessEqual(
+                    distance_heuristic(node, goal, TOY_COORDINATES),
+                    real_distance["distance_m"],
+                    f"h1 sobreestima desde el nodo {node}",
+                )
+                self.assertLessEqual(
+                    time_heuristic(node, goal, TOY_COORDINATES, toy_max_speed),
+                    real_time["estimated_time_s"],
+                    f"h2 sobreestima desde el nodo {node}",
+                )
+
+    def test_la_heuristica_es_consistente(self):
+        """Consistencia: h(n) <= costo(n -> n') + h(n') en cada arista.
+
+        Es la condicion que permite cerrar un nodo y no volver a mirarlo. Sin
+        ella, A* con closed_set puede devolver rutas subóptimas aunque la
+        heuristica sea admisible.
+        """
+        goal = 3
+        toy_max_speed = graph_max_speed_mps(TOY_GRAPH)
+
+        for current_node, neighbors in TOY_GRAPH.items():
+            for next_node, edge in neighbors.items():
+                with self.subTest(arista=(current_node, next_node)):
+                    self.assertLessEqual(
+                        distance_heuristic(current_node, goal, TOY_COORDINATES),
+                        edge["distance_m"]
+                        + distance_heuristic(next_node, goal, TOY_COORDINATES),
+                    )
+                    self.assertLessEqual(
+                        time_heuristic(
+                            current_node,
+                            goal,
+                            TOY_COORDINATES,
+                            toy_max_speed,
+                        ),
+                        edge["time_s"]
+                        + time_heuristic(
+                            next_node,
+                            goal,
+                            TOY_COORDINATES,
+                            toy_max_speed,
+                        ),
+                    )
+
+
+class AstarTests(unittest.TestCase):
+    """Comportamiento de A* y su relacion con UCS."""
+
+    # Pares con ruta existente en el grafo de juguete.
+    PAIRS = [(1, 3), (1, 4), (1, 5), (2, 4), (4, 1), (5, 1), (6, 1), (6, 3)]
+
+    def test_resultado_cumple_el_contrato(self):
+        """Mismas claves que UCS, con el nombre de la heuristica usada."""
+        result = astar(TOY_GRAPH, TOY_COORDINATES, 1, 3)
+
+        self.assertEqual(set(result.keys()), RESULT_KEYS)
+        self.assertEqual(result["algorithm"], "A*")
+        self.assertEqual(result["heuristic"], "distance")
+
+        by_time = astar(TOY_GRAPH, TOY_COORDINATES, 1, 3, mode="time")
+        self.assertEqual(by_time["heuristic"], "time")
+
+    def test_mismo_costo_que_ucs(self):
+        """La prueba central: A* es optimo, igual que UCS.
+
+        Si algun par diera un costo distinto, la heuristica estaria
+        sobreestimando o la condicion de parada estaria mal escrita.
+        """
+        toy_max_speed = graph_max_speed_mps(TOY_GRAPH)
+
+        for start, goal in self.PAIRS:
+            for mode in COST_KEYS:
+                with self.subTest(par=(start, goal), mode=mode):
+                    by_ucs = ucs(TOY_GRAPH, start, goal, mode=mode)
+                    by_astar = astar(
+                        TOY_GRAPH,
+                        TOY_COORDINATES,
+                        start,
+                        goal,
+                        mode=mode,
+                        max_speed_mps=toy_max_speed,
+                    )
+
+                    self.assertTrue(by_ucs["success"])
+                    self.assertTrue(by_astar["success"])
+
+                    field = (
+                        "estimated_time_s" if mode == "time" else "distance_m"
+                    )
+                    self.assertAlmostEqual(
+                        by_astar[field],
+                        by_ucs[field],
+                        places=6,
+                    )
+
+    def test_expande_menos_nodos_que_ucs(self):
+        """A* llega al mismo sitio mirando menos mapa."""
+        toy_max_speed = graph_max_speed_mps(TOY_GRAPH)
+
+        for mode in COST_KEYS:
+            with self.subTest(mode=mode):
+                by_ucs = ucs(TOY_GRAPH, 1, 3, mode=mode)
+                by_astar = astar(
+                    TOY_GRAPH,
+                    TOY_COORDINATES,
+                    1,
+                    3,
+                    mode=mode,
+                    max_speed_mps=toy_max_speed,
+                )
+
+                self.assertLess(
+                    by_astar["visited_nodes"],
+                    by_ucs["visited_nodes"],
+                )
+
+    def test_heuristica_inadmisible_rompe_la_optimalidad(self):
+        """Por que la velocidad maxima no se puede quedar corta.
+
+        Con una velocidad maxima falsa de 2.5 m/s la heuristica de tiempo se
+        infla, A* cree que rodear cuesta mucho mas de lo que cuesta y acaba
+        devolviendo el atajo caro de 200 s en vez de la ruta buena de 80 s.
+
+        El valor es exagerado a proposito para que el fallo se vea en un grafo
+        de seis nodos. En el mapa real el mecanismo es el mismo cuando se
+        declara VMAX = 80 km/h existiendo vias de 100.
+        """
+        correct = astar(
+            TOY_GRAPH,
+            TOY_COORDINATES,
+            1,
+            3,
+            mode="time",
+            max_speed_mps=graph_max_speed_mps(TOY_GRAPH),
+        )
+        broken = astar(
+            TOY_GRAPH,
+            TOY_COORDINATES,
+            1,
+            3,
+            mode="time",
+            max_speed_mps=2.5,
+        )
+
+        self.assertEqual(correct["path"], [1, 4, 5, 3])
+        self.assertAlmostEqual(correct["estimated_time_s"], 80.0)
+
+        # Misma implementacion y misma entrada: solo cambia la cota, y la ruta
+        # que devuelve empeora.
+        self.assertEqual(broken["path"], [1, 3])
+        self.assertGreater(
+            broken["estimated_time_s"],
+            correct["estimated_time_s"],
+        )
+
+    def test_respeta_las_vias_de_un_solo_sentido(self):
+        """Igual que UCS: el grafo dirigido manda."""
+        going = astar(TOY_GRAPH, TOY_COORDINATES, 1, 4)
+        returning = astar(TOY_GRAPH, TOY_COORDINATES, 4, 1)
+
+        self.assertEqual(going["path"], [1, 4])
+        self.assertEqual(returning["path"], [4, 5, 3, 2, 1])
+
+    def test_casos_especiales(self):
+        """Mismos errores controlados que UCS, nunca una excepcion."""
+        unreachable = astar(TOY_GRAPH, TOY_COORDINATES, 1, 6)
+        same_node = astar(TOY_GRAPH, TOY_COORDINATES, 3, 3)
+        missing = astar(TOY_GRAPH, TOY_COORDINATES, 999, 3)
+        empty = astar({}, TOY_COORDINATES, 1, 3)
+        bad_mode = astar(TOY_GRAPH, TOY_COORDINATES, 1, 3, mode="dinero")
+
+        self.assertFalse(unreachable["success"])
+        self.assertEqual(unreachable["message"], NO_ROUTE_MESSAGE)
+        self.assertFalse(same_node["success"])
+        self.assertEqual(same_node["message"], SAME_NODE_MESSAGE)
+        self.assertFalse(missing["success"])
+        self.assertFalse(empty["success"])
+        self.assertFalse(bad_mode["success"])
+
+    def test_sin_coordenadas_sigue_siendo_correcto(self):
+        """Sin coordenadas la heuristica vale 0 y A* degenera en UCS.
+
+        Es una degradacion segura: pierde velocidad, no correccion.
+        """
+        without_coordinates = astar(TOY_GRAPH, {}, 1, 3)
+        by_ucs = ucs(TOY_GRAPH, 1, 3)
+
+        self.assertTrue(without_coordinates["success"])
+        self.assertAlmostEqual(
+            without_coordinates["distance_m"],
+            by_ucs["distance_m"],
+        )
 
 
 if __name__ == "__main__":

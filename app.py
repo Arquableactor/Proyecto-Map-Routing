@@ -11,10 +11,14 @@ todo el archivo:
    variables normales: una variable global se reinicializaria en cada
    re-ejecucion y los puntos elegidos desaparecerian.
 
+El calculo de la ruta no vive aqui: esta en src/ui/route_service.py, que no
+depende de Streamlit y por eso se puede probar sin levantar un servidor.
+
 Ejecutar con:
     streamlit run app.py
 """
 
+from collections import namedtuple
 from pathlib import Path
 
 import folium
@@ -22,6 +26,13 @@ import streamlit as st
 from streamlit_folium import st_folium
 
 from src.graph_builder import build_graph
+from src.ui.route_service import (
+    AVAILABLE_ALGORITHMS,
+    compute_map_bounds,
+    find_route,
+    route_endpoints,
+    route_polyline,
+)
 
 OSM_PATH = Path("data/santo_domingo.osm")
 
@@ -30,6 +41,14 @@ OSM_PATH = Path("data/santo_domingo.osm")
 MAP_CENTER = (18.48, -69.93)
 MAP_ZOOM = 12
 MAP_HEIGHT = 560
+
+ROUTE_COLOR = "#1D4ED8"
+
+# Lo que ve el usuario, y el modo que entiende el agente.
+SEARCH_MODES = {
+    "Menor distancia": "distance",
+    "Menor tiempo estimado": "time",
+}
 
 # Lugares con ruta ya verificada sobre el grafo. Son el respaldo de la
 # demostracion: si los clics fallan, desde aqui se arma una ruta conocida.
@@ -42,19 +61,24 @@ KNOWN_PLACES = {
     "CEDIMAT": (18.48882, -69.92317),
 }
 
+RoadNetwork = namedtuple("RoadNetwork", "graph coordinates edge_count bounds")
+
 
 @st.cache_resource(show_spinner="Construyendo el grafo vial de Santo Domingo…")
-def load_road_graph():
+def load_road_network():
     """Carga el grafo una sola vez y lo reutiliza en toda la sesion.
 
     build_graph aprovecha graph_cache.pkl si existe, asi que tras la primera
-    vez el arranque es casi instantaneo. El conteo de aristas se calcula aqui
-    dentro a proposito: recorrer 156.000 nodos en cada re-ejecucion solo para
-    mostrar un numero seria un desperdicio.
+    vez el arranque es casi instantaneo. El conteo de aristas y los limites del
+    mapa se calculan aqui dentro a proposito: los dos recorren los 156.000
+    nodos, y hacerlo en cada re-ejecucion solo para mostrar un numero seria un
+    desperdicio.
     """
     graph, coordinates = build_graph(str(OSM_PATH))
     edge_count = sum(len(neighbors) for neighbors in graph.values())
-    return graph, coordinates, edge_count
+    bounds = compute_map_bounds(coordinates)
+
+    return RoadNetwork(graph, coordinates, edge_count, bounds)
 
 
 def init_session_state():
@@ -62,6 +86,7 @@ def init_session_state():
     st.session_state.setdefault("origin", None)
     st.session_state.setdefault("goal", None)
     st.session_state.setdefault("last_click", None)
+    st.session_state.setdefault("route", None)
 
 
 def register_point(point):
@@ -78,16 +103,65 @@ def register_point(point):
         st.session_state.origin = point
         st.session_state.goal = None
 
+    # La ruta anterior ya no corresponde a los puntos elegidos.
+    st.session_state.route = None
+
+
+def set_points(origin, goal):
+    """Fija origen y destino de una vez, desde los formularios de respaldo."""
+    st.session_state.origin = origin
+    st.session_state.goal = goal
+    st.session_state.last_click = None
+    st.session_state.route = None
+
 
 def clear_points():
-    """Borra la seleccion completa."""
+    """Borra la seleccion y la ruta calculada."""
     st.session_state.origin = None
     st.session_state.goal = None
     st.session_state.last_click = None
+    st.session_state.route = None
 
 
-def build_map():
-    """Arma el mapa de Folium con los marcadores que ya estan elegidos."""
+def draw_route(road_map, coordinates):
+    """Dibuja la ruta calculada sobre el mapa, si la hay y si tuvo exito."""
+    route = st.session_state.route
+
+    if route is None or not route["success"]:
+        return
+
+    polyline = route_polyline(route["path"], coordinates)
+    if not polyline:
+        return
+
+    folium.PolyLine(
+        polyline,
+        color=ROUTE_COLOR,
+        weight=6,
+        opacity=0.85,
+        tooltip="Ruta calculada",
+    ).add_to(road_map)
+
+    # Los extremos reales de la ruta no son donde el usuario hizo clic, sino
+    # el nodo de la red vial mas cercano. Mostrarlos deja ver ese enganche.
+    start_point, goal_point = route_endpoints(route["path"], coordinates)
+
+    for point, label in ((start_point, "Nodo de partida"), (goal_point, "Nodo de llegada")):
+        if point is not None:
+            folium.CircleMarker(
+                point,
+                radius=6,
+                color=ROUTE_COLOR,
+                fill=True,
+                fill_opacity=1.0,
+                tooltip=label,
+            ).add_to(road_map)
+
+    road_map.fit_bounds(polyline)
+
+
+def build_map(coordinates):
+    """Arma el mapa de Folium con los marcadores y la ruta actual."""
     road_map = folium.Map(
         location=MAP_CENTER,
         zoom_start=MAP_ZOOM,
@@ -108,6 +182,8 @@ def build_map():
             tooltip="Destino",
             icon=folium.Icon(color="red", icon="flag"),
         ).add_to(road_map)
+
+    draw_route(road_map, coordinates)
 
     return road_map
 
@@ -158,10 +234,71 @@ def render_selection():
         st.info("Haz clic en el mapa para elegir el punto de partida.")
     elif st.session_state.goal is None:
         st.info("Ahora haz clic en el punto de destino.")
-    else:
-        st.success("Origen y destino listos.")
 
     st.button("Reiniciar puntos", on_click=clear_points, use_container_width=True)
+
+
+def render_search_controls(network):
+    """Selector de criterio y de algoritmo, y el boton de calcular."""
+    st.subheader("Búsqueda")
+
+    mode_label = st.selectbox("Criterio", list(SEARCH_MODES))
+    algorithm = st.selectbox("Algoritmo", AVAILABLE_ALGORITHMS)
+
+    ready = st.session_state.origin is not None and st.session_state.goal is not None
+
+    calculate = st.button(
+        "Calcular ruta",
+        type="primary",
+        disabled=not ready,
+        use_container_width=True,
+    )
+
+    if not calculate:
+        return
+
+    # El spinner no es adorno: la peticion que NO encuentra ruta es la mas
+    # lenta del sistema, hasta 1,5 s recorriendo los 156.431 nodos. Sin
+    # indicador el usuario cree que la aplicacion se colgo.
+    with st.spinner("Calculando ruta…"):
+        st.session_state.route = find_route(
+            network.graph,
+            network.coordinates,
+            st.session_state.origin,
+            st.session_state.goal,
+            network.bounds,
+            mode=SEARCH_MODES[mode_label],
+            algorithm=algorithm,
+        )
+
+    # El mapa se dibujo antes de pulsar el boton: hay que repintarlo con la
+    # ruta recien calculada.
+    st.rerun()
+
+
+def render_result():
+    """Muestra el resultado de la ultima busqueda."""
+    route = st.session_state.route
+
+    if route is None:
+        return
+
+    st.subheader("Resultado")
+
+    # Nunca se muestra una traza: el agente ya redacta el mensaje en español.
+    if not route["success"]:
+        st.warning(route["message"])
+        return
+
+    st.metric("Distancia", f"{route['distance_m']:,.0f} m")
+    st.metric("Tiempo estimado", f"{route['estimated_time_s']:,.0f} s")
+
+    st.caption(
+        f"{len(route['path']):,} nodos en la ruta · "
+        f"{route['visited_nodes']:,} nodos explorados · "
+        f"{route['runtime_ms']:,.1f} ms · "
+        f"{route['algorithm']} ({route['heuristic']})"
+    )
 
 
 def render_known_places():
@@ -177,9 +314,7 @@ def render_known_places():
         )
 
     if submitted:
-        st.session_state.origin = KNOWN_PLACES[origin_name]
-        st.session_state.goal = KNOWN_PLACES[goal_name]
-        st.session_state.last_click = None
+        set_points(KNOWN_PLACES[origin_name], KNOWN_PLACES[goal_name])
         st.rerun()
 
 
@@ -196,9 +331,7 @@ def render_manual_coordinates():
         )
 
     if submitted:
-        st.session_state.origin = (origin_lat, origin_lon)
-        st.session_state.goal = (goal_lat, goal_lon)
-        st.session_state.last_click = None
+        set_points((origin_lat, origin_lon), (goal_lat, goal_lon))
         st.rerun()
 
 
@@ -222,19 +355,20 @@ def main():
         )
         st.stop()
 
-    graph, coordinates, edge_count = load_road_graph()
+    network = load_road_network()
 
     st.title("Ruteo en Santo Domingo")
     st.caption(
-        f"Grafo dirigido con {len(graph):,} nodos y {edge_count:,} aristas, "
-        "construido desde datos de OpenStreetMap."
+        f"Grafo dirigido con {len(network.graph):,} nodos y "
+        f"{network.edge_count:,} aristas, construido desde datos de "
+        "OpenStreetMap."
     )
 
     map_column, panel_column = st.columns([3, 1], gap="medium")
 
     with map_column:
         map_state = st_folium(
-            build_map(),
+            build_map(network.coordinates),
             height=MAP_HEIGHT,
             use_container_width=True,
             returned_objects=["last_clicked"],
@@ -246,6 +380,8 @@ def main():
 
     with panel_column:
         render_selection()
+        render_search_controls(network)
+        render_result()
 
         with st.expander("Lugares verificados"):
             render_known_places()
